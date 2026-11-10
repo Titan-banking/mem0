@@ -22,7 +22,7 @@ from mem0.configs.prompts import (
     PROCEDURAL_MEMORY_SYSTEM_PROMPT,
     generate_additive_extraction_prompt,
 )
-from mem0.exceptions import LLMError, VectorStoreError
+from mem0.exceptions import DatabaseError, LLMError, VectorStoreError
 from mem0.exceptions import ValidationError as Mem0ValidationError
 from mem0.memory.base import MemoryBase
 from mem0.memory.notices import (
@@ -64,6 +64,7 @@ from mem0.utils.factory import (
     LlmFactory,
     RerankerFactory,
     VectorStoreFactory,
+    GraphStoreFactory,
 )
 from mem0.utils.lemmatization import lemmatize_for_bm25
 from mem0.utils.scoring import (
@@ -510,6 +511,15 @@ class Memory(MemoryBase):
                 config.reranker.config
             )
 
+        self.graph = None
+        if config.graph_store:
+            self.graph = GraphStoreFactory.create(
+                config.graph_store.provider,
+                config.graph_store.config,
+                llm=self.llm,
+                namespace=self.collection_name,
+            )
+
         # Entity store is initialized lazily on first use
         self._entity_store = None
 
@@ -854,6 +864,8 @@ class Memory(MemoryBase):
         # Remove memory_type and its helpers from Memory and AsyncMemory together.
         if agent_id is not None and memory_type == MemoryType.PROCEDURAL.value:
             results = self._create_procedural_memory(messages, metadata=processed_metadata, prompt=prompt)
+            if self.graph:
+                results["relations"] = self.graph.add(results["results"], effective_filters) if infer else []
             scale_threshold_notice = detect_scale_threshold_from_add_result(self, results)
             if temporal_usage_notice:
                 display_temporal_usage_notice(self, "sync", "add", *temporal_usage_notice)
@@ -869,6 +881,9 @@ class Memory(MemoryBase):
             messages = parse_vision_messages(messages)
 
         vector_store_result = self._add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=prompt)
+        response = {"results": vector_store_result}
+        if self.graph:
+            response["relations"] = self.graph.add(vector_store_result, effective_filters) if infer else []
         scale_threshold_notice = detect_scale_threshold_from_add_result(self, vector_store_result)
         if temporal_usage_notice:
             display_temporal_usage_notice(self, "sync", "add", *temporal_usage_notice)
@@ -876,7 +891,7 @@ class Memory(MemoryBase):
             display_scale_threshold_notice(self, "sync", "add", *scale_threshold_notice)
         else:
             display_first_run_notice(self, "sync", "add")
-        return {"results": vector_store_result}
+        return response
 
     def _add_to_vector_store(self, messages, metadata, filters, infer, prompt=None):
         if not infer:
@@ -1263,6 +1278,9 @@ class Memory(MemoryBase):
         if additional_metadata:
             result_item["metadata"] = additional_metadata
 
+        if self.graph:
+            result_item["relations"] = self.graph.get_relations([memory_id])
+
         display_first_run_notice(self, "sync", "get")
         return result_item
 
@@ -1330,12 +1348,14 @@ class Memory(MemoryBase):
         )
 
         all_memories_result = self._get_all_from_vector_store(effective_filters, fetch_limit, show_expired, limit)
-
+        response = {"results": all_memories_result}
+        if self.graph:
+            response["relations"] = self.graph.get_relations([m["id"] for m in all_memories_result])
         if scale_threshold_notice:
             display_scale_threshold_notice(self, "sync", "get_all", *scale_threshold_notice)
         else:
             display_first_run_notice(self, "sync", "get_all")
-        return {"results": all_memories_result}
+        return response
 
     def _get_all_from_vector_store(self, filters, limit, show_expired=False, output_limit=None):
         memories_result = self.vector_store.list(filters=filters, top_k=limit)
@@ -1533,7 +1553,11 @@ class Memory(MemoryBase):
             )
         else:
             display_first_run_notice(self, "sync", "search")
-        return {"results": original_memories}
+        response = {"results": original_memories}
+        if self.graph:
+            response["relations"] = self.graph.get_relations([m["id"] for m in original_memories])
+
+        return response
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1941,6 +1965,10 @@ class Memory(MemoryBase):
                 break
             batch_ids = tuple(sorted(str(memory.id) for memory in memories))
             if batch_ids in seen_batches:
+                if self.graph:
+                    raise DatabaseError(
+                        "Repeated memory batch during delete_all; graph cleanup would be incomplete",
+                        error_code="DB_001", details={"provider": "arcadedb", "stage": "delete_all"})
                 logger.warning("Stopping delete_all after a repeated memory batch")
                 break
             seen_batches.add(batch_ids)
@@ -1949,6 +1977,9 @@ class Memory(MemoryBase):
             deleted_count += len(memories)
 
         logger.info(f"Deleted {deleted_count} memories")
+
+        if self.graph:
+            self.graph.delete_all(filters)
 
         decay_usage_notice = detect_decay_usage_from_delete_all(deleted_count)
         if decay_usage_notice:
@@ -2110,6 +2141,9 @@ class Memory(MemoryBase):
         if text_changed:
             self._remove_memory_from_entity_store(memory_id, session_filters)
             self._link_entities_for_memory(memory_id, data, session_filters)
+            if self.graph:
+                self.graph.replace(memory_id, data, session_filters)
+
 
         return memory_id
 
@@ -2124,6 +2158,9 @@ class Memory(MemoryBase):
         updated_at = datetime.now(timezone.utc).isoformat()
         payload = existing_memory.payload or {}
         session_filters = {k: payload[k] for k in ("user_id", "agent_id", "run_id") if payload.get(k)}
+        if self.graph:
+            self.graph.delete(memory_id, session_filters)
+
         self.vector_store.delete(vector_id=memory_id)
         self.db.add_history(
             memory_id,
@@ -2152,6 +2189,9 @@ class Memory(MemoryBase):
         """
         logger.warning("Resetting all memories")
 
+        if self.graph:
+            self.graph.reset()
+
         self.db.reset()
         self.db.close()
         self.db = SQLiteManager(self.config.history_db_path)
@@ -2164,6 +2204,7 @@ class Memory(MemoryBase):
             self.vector_store = VectorStoreFactory.create(
                 self.config.vector_store.provider, self.config.vector_store.config
             )
+
         # Reset entity store if initialized
         if self._entity_store is not None:
             try:
@@ -2180,6 +2221,10 @@ class Memory(MemoryBase):
         if hasattr(self, "db") and self.db is not None:
             self.db.close()
             self.db = None
+        if getattr(self, "graph", None) is not None:
+            self.graph.close()
+            self.graph = None
+
 
     def __enter__(self):
         return self
@@ -2217,6 +2262,15 @@ class AsyncMemory(MemoryBase):
             self.reranker = RerankerFactory.create(
                 config.reranker.provider,
                 config.reranker.config
+            )
+
+        self.graph = None
+        if config.graph_store:
+            self.graph = GraphStoreFactory.create(
+                config.graph_store.provider,
+                config.graph_store.config,
+                llm=self.llm,
+                namespace=self.collection_name,
             )
 
         if MEM0_TELEMETRY:
@@ -2531,6 +2585,9 @@ class AsyncMemory(MemoryBase):
             results = await self._create_procedural_memory(
                 messages, metadata=processed_metadata, prompt=prompt, llm=llm
             )
+            if self.graph:
+                results["relations"] = (
+                    await asyncio.to_thread(self.graph.add, results["results"], effective_filters) if infer else [])
             scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, results)
             if temporal_usage_notice:
                 await display_temporal_usage_notice_async(self, "async", "add", *temporal_usage_notice)
@@ -2546,6 +2603,10 @@ class AsyncMemory(MemoryBase):
             messages = parse_vision_messages(messages)
 
         vector_store_result = await self._add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=prompt)
+        response = {"results": vector_store_result}
+        if self.graph:
+            response["relations"] = (
+                await asyncio.to_thread(self.graph.add, vector_store_result, effective_filters) if infer else [])
         scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, vector_store_result)
         if temporal_usage_notice:
             await display_temporal_usage_notice_async(self, "async", "add", *temporal_usage_notice)
@@ -2553,7 +2614,7 @@ class AsyncMemory(MemoryBase):
             await display_scale_threshold_notice_async(self, "async", "add", *scale_threshold_notice)
         else:
             await display_first_run_notice_async(self, "async", "add")
-        return {"results": vector_store_result}
+        return response
 
     async def _add_to_vector_store(
         self,
@@ -2946,6 +3007,9 @@ class AsyncMemory(MemoryBase):
         if additional_metadata:
             result_item["metadata"] = additional_metadata
 
+        if self.graph:
+            result_item["relations"] = await asyncio.to_thread(self.graph.get_relations, [memory_id])
+
         await display_first_run_notice_async(self, "async", "get")
         return result_item
 
@@ -3013,12 +3077,15 @@ class AsyncMemory(MemoryBase):
         )
 
         all_memories_result = await self._get_all_from_vector_store(effective_filters, fetch_limit, show_expired, limit)
-
+        response = {"results": all_memories_result}
+        if self.graph:
+            response["relations"] = await asyncio.to_thread(
+                self.graph.get_relations, [m["id"] for m in all_memories_result])
         if scale_threshold_notice:
             await display_scale_threshold_notice_async(self, "async", "get_all", *scale_threshold_notice)
         else:
             await display_first_run_notice_async(self, "async", "get_all")
-        return {"results": all_memories_result}
+        return response
 
     async def _get_all_from_vector_store(self, filters, limit, show_expired=False, output_limit=None):
         memories_result = await asyncio.to_thread(self.vector_store.list, filters=filters, top_k=limit)
@@ -3223,7 +3290,11 @@ class AsyncMemory(MemoryBase):
             )
         else:
             await display_first_run_notice_async(self, "async", "search")
-        return {"results": original_memories}
+        response = {"results": original_memories}
+        if self.graph:
+            response["relations"] = await asyncio.to_thread(
+                self.graph.get_relations, [m["id"] for m in original_memories])
+        return response
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -3624,6 +3695,10 @@ class AsyncMemory(MemoryBase):
                 break
             batch_ids = tuple(sorted(str(memory.id) for memory in batch))
             if batch_ids in seen_batches:
+                if self.graph:
+                    raise DatabaseError(
+                        "Repeated memory batch during delete_all; graph cleanup would be incomplete",
+                        error_code="DB_001", details={"provider": "arcadedb", "stage": "delete_all"})
                 logger.warning("Stopping delete_all after a repeated memory batch")
                 break
             seen_batches.add(batch_ids)
@@ -3645,6 +3720,13 @@ class AsyncMemory(MemoryBase):
             logger.warning("Failed to delete %d memories", len(errors))
             for err in errors:
                 logger.warning("Delete error: %s", err)
+
+        if self.graph:
+            if errors:
+                raise DatabaseError(
+                    f"delete_all failed for {len(errors)} memories; graph cleanup skipped to keep remaining support",
+                    error_code="DB_001", details={"provider": "arcadedb", "stage": "delete_all"}) from errors[0]
+            await asyncio.to_thread(self.graph.delete_all, filters)
 
         logger.info(f"Deleted {deleted_count} memories")
 
@@ -3832,6 +3914,9 @@ class AsyncMemory(MemoryBase):
         if text_changed:
             await self._remove_memory_from_entity_store(memory_id, session_filters)
             await self._link_entities_for_memory(memory_id, data, session_filters)
+            if self.graph:
+                await asyncio.to_thread(self.graph.replace, memory_id, data, session_filters)
+
 
         return memory_id
 
@@ -3846,6 +3931,9 @@ class AsyncMemory(MemoryBase):
         updated_at = datetime.now(timezone.utc).isoformat()
         payload = existing_memory.payload or {}
         session_filters = {k: payload[k] for k in ("user_id", "agent_id", "run_id") if payload.get(k)}
+
+        if self.graph:
+            await asyncio.to_thread(self.graph.delete, memory_id, session_filters)
 
         await asyncio.to_thread(self.vector_store.delete, vector_id=memory_id)
         await asyncio.to_thread(
@@ -3874,6 +3962,9 @@ class AsyncMemory(MemoryBase):
             Recreates the vector store with a new client
         """
         logger.warning("Resetting all memories")
+        if self.graph:
+            await asyncio.to_thread(self.graph.reset)
+
         await asyncio.to_thread(self.vector_store.delete_col)
 
         gc.collect()
@@ -3883,6 +3974,7 @@ class AsyncMemory(MemoryBase):
 
         await asyncio.to_thread(self.db.reset)
         await asyncio.to_thread(self.db.close)
+
         self.db = SQLiteManager(self.config.history_db_path)
 
         self.vector_store = VectorStoreFactory.create(
@@ -3904,6 +3996,10 @@ class AsyncMemory(MemoryBase):
         if hasattr(self, "db") and self.db is not None:
             self.db.close()
             self.db = None
+        if getattr(self, "graph", None) is not None:
+            self.graph.close()
+            self.graph = None
+
 
     async def __aenter__(self):
         return self

@@ -72,6 +72,7 @@ def performance_payload(copy="Performance CTA", enabled=True, notice_type="log_l
 
 def make_sync_memory(search_results=None):
     memory = Memory.__new__(Memory)
+    memory.graph = None
     memory.api_version = "v1.1"
     memory.reranker = None
     memory._search_vector_store = MagicMock(return_value=search_results or [])
@@ -80,6 +81,7 @@ def make_sync_memory(search_results=None):
 
 def make_async_memory(search_results=None):
     memory = AsyncMemory.__new__(AsyncMemory)
+    memory.graph = None
     memory.api_version = "v1.1"
     memory.reranker = None
     memory._search_vector_store = AsyncMock(return_value=search_results or [])

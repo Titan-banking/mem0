@@ -278,3 +278,18 @@ class RerankerFactory:
             raise ImportError(f"Could not import reranker for provider '{provider_name}': {e}")
 
         return reranker_class(config)
+
+
+class GraphStoreFactory:
+    provider_to_class = {
+        "arcadedb": "mem0.graphs.arcadedb.ArcadeDBGraph",
+    }
+
+    @classmethod
+    def create(cls, provider_name, config, *, llm, namespace):
+        """`namespace` is the fallback (the vector collection name); `config.namespace` wins when set."""
+        class_type = cls.provider_to_class.get(provider_name)
+        if not class_type:
+            raise ValueError(f"Unsupported Graph provider: {provider_name}")
+        graph_class = load_class(class_type)
+        return graph_class(config, llm=llm, namespace=getattr(config, "namespace", None) or namespace)

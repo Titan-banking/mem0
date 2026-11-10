@@ -9,6 +9,8 @@ from mem0.memory.main import AsyncMemory, Memory
 
 def make_sync_memory():
     memory = Memory.__new__(Memory)
+    memory.graph = None
+
     memory.vector_store = MagicMock()
     memory._delete_memory = MagicMock()
     return memory
@@ -16,6 +18,8 @@ def make_sync_memory():
 
 def make_async_memory():
     memory = AsyncMemory.__new__(AsyncMemory)
+    memory.graph = None
+
     memory.vector_store = MagicMock()
     memory._delete_memory = AsyncMock()
     memory._entity_store = None

@@ -10,6 +10,7 @@ from mem0.memory.main import AsyncMemory, Memory
 def make_sync_memory():
     memory = Memory.__new__(Memory)
     memory.config = SimpleNamespace(llm=SimpleNamespace(config={}))
+    memory.graph = None
     memory.api_version = "v1.1"
     memory.reranker = None
     memory._add_to_vector_store = MagicMock(return_value=[])
@@ -20,6 +21,7 @@ def make_sync_memory():
 def make_async_memory():
     memory = AsyncMemory.__new__(AsyncMemory)
     memory.config = SimpleNamespace(llm=SimpleNamespace(config={}))
+    memory.graph = None
     memory.api_version = "v1.1"
     memory.reranker = None
     memory._add_to_vector_store = AsyncMock(return_value=[])

@@ -139,6 +139,14 @@ features = [
   "dev",
 ]
 
+[tool.hatch.envs.graph_benchmark]
+python = "3.12"
+features = ["test", "dev", "llms", "extras"]
+dependencies = [
+  "falkordb==1.8.1",
+  "numpy>=2,<3"
+]
+
 [tool.hatch.envs.default.scripts]
 format = [
     "ruff format",

@@ -270,6 +270,8 @@ def test_public_add_succeeds_when_first_run_flag_eval_fails(notice_harness):
     _, telemetry = notice_harness
     telemetry._evaluate_mock.side_effect = RuntimeError("network unavailable")
     memory = Memory.__new__(Memory)
+    memory.graph = None
+
     memory.config = SimpleNamespace(llm=SimpleNamespace(config={}))
     memory._add_to_vector_store = MagicMock(return_value=[{"event": "ADD", "memory": "likes tea"}])
 
@@ -283,6 +285,7 @@ def test_public_search_succeeds_when_first_run_flag_eval_fails(notice_harness, m
     telemetry._evaluate_mock.side_effect = RuntimeError("network unavailable")
     monkeypatch.setattr(memory_main, "capture_event", MagicMock())
     memory = Memory.__new__(Memory)
+    memory.graph = None
     memory.api_version = "v1.1"
     memory.reranker = None
     memory._search_vector_store = MagicMock(return_value=[{"memory": "likes tea"}])
@@ -302,6 +305,7 @@ def test_async_notice_wrapper_uses_shared_helper(monkeypatch):
     def display(memory_instance, sync_type, trigger_function):
         calls.append((memory_instance, sync_type, trigger_function))
 
+    monkeypatch.setattr(telemetry_module, "MEM0_TELEMETRY", True)
     memory = MagicMock()
     monkeypatch.setattr(notices, "display_first_run_notice", display)
 
@@ -1511,6 +1515,7 @@ def test_notice_priority_temporal_usage_beats_scale_and_first_run(monkeypatch):
     from mem0.memory import main as memory_main
 
     memory = memory_main.Memory.__new__(memory_main.Memory)
+    memory.graph = None
     memory.api_version = "v1.1"
     memory.reranker = None
     memory._search_vector_store = MagicMock(return_value=[])
@@ -1535,6 +1540,7 @@ def test_notice_priority_scale_beats_first_run(monkeypatch):
     from mem0.memory import main as memory_main
 
     memory = memory_main.Memory.__new__(memory_main.Memory)
+    memory.graph = None
     memory.api_version = "v1.1"
     memory.reranker = None
     memory._search_vector_store = MagicMock(return_value=[])

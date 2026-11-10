@@ -38,7 +38,7 @@ These changes produce a **+20 point improvement on LoCoMo** (71.4 → 91.6) and 
 | `add()` events | Returns `ADD`, `UPDATE`, `DELETE` | Returns `ADD` only | Update code expecting UPDATE/DELETE |
 | Custom extraction prompt | `custom_fact_extraction_prompt` | `custom_instructions` | Rename in config |
 | Custom update prompt | `custom_update_memory_prompt` | Deprecated | Use `custom_instructions` instead |
-| Graph memory | `enable_graph` + `graph_store` in config | Removed | Graph memory is removed from OSS. It's a built-in, always-on [Mem0 Platform feature](/platform/features/graph-memory) |
+| Graph memory | `enable_graph` + `graph_store` in config | `enable_graph` removed; `graph_store` is now optional | The Neo4j/Memgraph/Kuzu/AGE/Neptune drivers and graph retrieval are removed from OSS. Python OSS has a new opt-in [ArcadeDB result enrichment](#graph-memory-result-enrichment) that adds a `relations` list to results. Platform graph memory is built in and always on: [Graph Memory](/platform/features/graph-memory) |
 | Qdrant client | `>=1.9.1` | `>=1.12.0` | Update dependency |
 | Upstash client | `>=0.1.0` | `>=0.6.0` | Update dependency |
 
@@ -125,7 +125,7 @@ pip install fastembed
     config = {
         "custom_fact_extraction_prompt": "Focus on user preferences",  # [REMOVED] Renamed
         "custom_update_memory_prompt": "Be concise when updating",      # [REMOVED] Deprecated
-        "graph_store": {
+        "graph_store": {                                   # [REMOVED] Neo4j and the other drivers are gone
             "provider": "neo4j",
             "config": { "url": "...", "username": "...", "password": "..." }
         },
@@ -136,7 +136,8 @@ pip install fastembed
     config = {
         "custom_instructions": "Focus on user preferences",  # [OK] New name
         # custom_update_memory_prompt removed: use custom_instructions
-        # enable_graph and graph_store removed: graph memory is now a Mem0 Platform feature
+        # enable_graph removed; the old graph_store providers are removed. Optional: configure
+        # graph_store with provider "arcadedb" for relation enrichment (see "Graph Memory: Result Enrichment")
     }
     ```
   </Tab>
@@ -329,24 +330,59 @@ The new algorithm automatically creates a parallel collection named `{your_colle
 Make sure your vector store user/credentials have permission to create new collections. If you're using a managed vector database with restricted permissions, pre-create the `{collection_name}_entities` collection with the same embedding dimensions as your main collection.
 </Warning>
 
-## Graph Memory: Platform Only
+## Graph Memory: Result Enrichment
 
-Graph memory is removed from the open-source SDK. It is not being replaced by an OSS equivalent: graph memory is a **Mem0 Platform** feature, built in and always on, with no external graph database required. See [Graph Memory](/platform/features/graph-memory) for what it does on Platform.
+Independent graph retrieval and old providers (Neo4j, Memgraph, Kuzu, etc.) have been removed from the open-source SDK. The new OSS graph feature is opt-in **result enrichment**: when enabled, it extracts relations from your persisted memories and attaches them to the returned search results without altering the candidate set.
 
-**What was removed from OSS:**
-- `enable_graph` / `enableGraph` config flag
-- `graph_store` / `graphStore` configuration block
-- All external graph store drivers (Neo4j, Memgraph, Kuzu, Apache AGE, Neptune) and their code paths (~4000 lines)
+### Configuring ArcadeDB
 
-**Migration:**
-- Remove `enable_graph` / `enableGraph` from your config
-- Remove the `graph_store` / `graphStore` block: it is no longer read
-- Uninstall external graph drivers (neo4j, memgraph, etc.) if you were using them only for Mem0
-- If you need graph memory, use [Mem0 Platform](/platform/features/graph-memory) instead of self-hosted OSS
+OSS graph enrichment uses ArcadeDB. It reuses your existing vector filters and metadata, maintaining correct tenant scoping.
 
-<Warning>
-The old `relations` field on search results (populated by the external graph store) is no longer returned in OSS. OSS has no graph memory replacement, so there is nothing to populate this field with. If your application read or traversed the `relations` array, either move to Mem0 Platform to keep that data or redesign that part against the new OSS retrieval API.
-</Warning>
+```python
+from mem0 import Memory
+
+config = {
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {"path": "/tmp/qdrant"}
+    },
+    "graph_store": {
+        "provider": "arcadedb",
+        "config": {
+            "url": "http://localhost:2480",
+            "database": "mem0",
+            "username": "root",
+            "password": "your_password"
+        }
+    }
+}
+
+m = Memory.from_config(config)
+```
+
+### Returned Relations Shape
+
+When `graph_store` is configured, `add`, `search` and `get_all` return the usual `results` **unchanged** plus a top-level `relations` list. `get` adds the same list to its memory object. Each relation aggregates the returned memories that support it, sorted by `source`, `relationship`, `destination`:
+
+```json
+{
+  "results": [{"id": "m1", "memory": "Alice works at Acme.", "event": "ADD"}],
+  "relations": [
+    {"source": "alice", "relationship": "works_at", "destination": "acme", "memory_ids": ["m1"]}
+  ]
+}
+```
+
+Behavior to know about:
+
+- `relations` only ever covers memory ids that are in the returned `results`, so existing filters, expiration (`show_expired`) and ranking still decide what you see. Relations never add or re-rank results.
+- Relations are extracted by your configured LLM from the memory text that was actually stored. `infer=False` skips extraction and returns `"relations": []`. Metadata-only updates do not re-extract.
+- Names are lowercased with spaces replaced by underscores. Relations are scoped to the exact `user_id` / `agent_id` / `run_id` tuple, so two users with an `alice` never share edges.
+- The database must already exist; Mem0 creates only its own `Mem0Entity` / `Mem0Relation` types. Vector datasets that share a collection name must set distinct `namespace` values in the graph config.
+- The vector store and ArcadeDB cannot commit atomically. A graph failure raises `DatabaseError` (details include `memory_ids` and `stage`) instead of returning empty relations; retry the operation explicitly.
+- This is Python only; the TypeScript OSS SDK has no graph store.
+
+If your application relied on traversing the old independent graph queries, you must adapt to this new model where relations annotate vector results.
 
 ## How the New Algorithm Works
 

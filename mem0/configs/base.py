@@ -8,6 +8,7 @@ from mem0.embeddings.configs import EmbedderConfig
 from mem0.llms.configs import LlmConfig
 from mem0.vector_stores.configs import VectorStoreConfig
 
+from mem0.graphs.configs import GraphStoreConfig
 # Set up the directory path
 home_dir = os.path.expanduser("~")
 mem0_dir = os.environ.get("MEM0_DIR") or os.path.join(home_dir, ".mem0")
@@ -45,6 +46,10 @@ class MemoryConfig(BaseModel):
     )
     reranker: Optional[RerankerConfig] = Field(
         description="Configuration for the reranker",
+        default=None,
+    )
+    graph_store: Optional[GraphStoreConfig] = Field(
+        description="Configuration for the graph store",
         default=None,
     )
     version: str = Field(
